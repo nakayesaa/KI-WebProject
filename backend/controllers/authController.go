@@ -90,8 +90,19 @@ func (c *AuthController) Login(ctx *gin.Context) {
 		return
 	}
 
+	ctx.SetSameSite(http.SameSiteLaxMode)
+
+	ctx.SetCookie(
+		"access_token",
+		token,
+		3600*24,
+		"/",
+		"",
+		false,
+		true,
+	)
+
 	ctx.JSON(http.StatusOK, gin.H{
 		"message": "Login successful",
-		"token":   token,
 	})
 }

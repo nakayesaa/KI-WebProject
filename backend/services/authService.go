@@ -6,6 +6,7 @@ import (
 	"project1/repositories"
 	"project1/utils"
 
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -68,4 +69,8 @@ func (s *AuthService) Login(username string, password string) (string, error) {
 	}
 
 	return token, nil
+}
+
+func (s *AuthService) ValidateToken(tokenString string) (jwt.MapClaims, error) {
+	return utils.ValidateToken(tokenString)
 }
