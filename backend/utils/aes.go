@@ -1,9 +1,7 @@
 package utils
 
-import "os"
-
 type State [4][4]byte
-var AESKEY := os.Getenv("AES_KEY")
+
 func BytesToState(input [16]byte) State {
 	var state State
 	for i := range 16 {
@@ -19,7 +17,7 @@ func BytesToState(input [16]byte) State {
 func GFMul(a, b byte) byte {
 	var result byte
 
-	for i := range 8 {
+	for range 8 {
 		if b&1 != 0 {
 			result ^= a
 		}
@@ -77,7 +75,7 @@ func GenerateSBox() [256]byte {
 }
 
 // generate RoundKey
-func KeyExpansion(key [16]byte) [11]State {
+func KeyExpansion(key [16]byte) ([11]State, [256]byte) {
 	var words [44][4]byte
 	sbox := GenerateSBox()
 
@@ -90,7 +88,6 @@ func KeyExpansion(key [16]byte) [11]State {
 		0x01, 0x02, 0x04, 0x08, 0x10,
 		0x20, 0x40, 0x80, 0x1B, 0x36,
 	}
-
 	for i := 4; i < 44; i++ {
 		temp := words[i-1]
 
@@ -126,21 +123,88 @@ func KeyExpansion(key [16]byte) [11]State {
 		}
 	}
 
-	return roundKeys
+	return roundKeys, sbox
 }
 
-func AesEncrypt(plainText [16]byte) [16]byte {
-	state := BytesToState(plainText)
-	KeyString := os.Getenv("AES_KEY")
-
-	if len(KeyString) > 16 {
-		panic("AES_KEY must be exactly 16 bytes")
+func SubBytes(state *State, sbox *[256]byte) {
+	for row := range 4 {
+		for col := range 4 {
+			state[row][col] = sbox[state[row][col]]
+		}
 	}
-	var key [16]byte
-	copy(key[:], []byte(keyString))
+}
 
-	roundKey := KeyExpansion(key)
+func ShiftRow(state *State) {
+	for row := 1; row < 4; row++ {
+		var temp [4]byte
 
+		for col := 0; col < 4; col++ {
+			temp[col] = state[row][(col+row)%4]
+		}
+		state[row] = temp
+	}
+}
 
+func MixColumns(state *State) {
+	for col := 0; col < 4; col++ {
+		a0 := state[0][col]
+		a1 := state[1][col]
+		a2 := state[2][col]
+		a3 := state[3][col]
 
+		b0 := GFMul(0x02, a0) ^ GFMul(0x03, a1) ^ a2 ^ a3
+		b1 := a0 ^ GFMul(0x02, a1) ^ GFMul(0x03, a2) ^ a3
+		b2 := a0 ^ a1 ^ GFMul(0x02, a2) ^ GFMul(0x03, a3)
+		b3 := GFMul(0x03, a0) ^ a1 ^ a2 ^ GFMul(0x02, a3)
+
+		state[0][col] = b0
+		state[1][col] = b1
+		state[2][col] = b2
+		state[3][col] = b3
+	}
+}
+
+func AddRoundKey(state *State, roundKey *State) {
+	for row := range 4 {
+		for col := range 4 {
+			state[row][col] ^= roundKey[row][col]
+		}
+	}
+}
+
+func StateToBytes(state State) [16]byte {
+	var result [16]byte
+
+	for i := range 16 {
+		row := i % 4
+		col := i / 4
+
+		result[i] = state[row][col]
+	}
+
+	return result
+}
+
+func AesEncrypt128(plainText [16]byte, key [16]byte) [16]byte {
+	state := BytesToState(plainText)
+
+	roundKeys, sbox := KeyExpansion(key)
+
+	// Initial Round
+	AddRoundKey(&state, &roundKeys[0])
+
+	// Round 1–9
+	for round := 1; round < 10; round++ {
+		SubBytes(&state, &sbox)
+		ShiftRow(&state)
+		MixColumns(&state)
+		AddRoundKey(&state, &roundKeys[round])
+	}
+
+	// Final Round (10)
+	SubBytes(&state, &sbox)
+	ShiftRow(&state)
+	AddRoundKey(&state, &roundKeys[10])
+
+	return StateToBytes(state)
 }
