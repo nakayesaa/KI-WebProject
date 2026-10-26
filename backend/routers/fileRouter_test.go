@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,6 +29,7 @@ import (
 type memoryFileRepository struct {
 	files     map[uint]models.File
 	uploadErr error
+	listErr   error
 	findErr   error
 	updateErr error
 }
@@ -39,6 +41,20 @@ func (r *memoryFileRepository) UploadFile(file *models.File) error {
 	file.ID = uint(len(r.files) + 1)
 	r.files[file.ID] = *file
 	return nil
+}
+
+func (r *memoryFileRepository) ListByUserID(userID uint) ([]models.File, error) {
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	files := make([]models.File, 0)
+	for _, file := range r.files {
+		if file.UserID == userID {
+			files = append(files, file)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].ID > files[j].ID })
+	return files, nil
 }
 
 func (r *memoryFileRepository) FindByIDAndUserID(fileID, userID uint) (*models.File, error) {
@@ -224,6 +240,7 @@ func TestFileRoutesRequireAuthentication(t *testing.T) {
 	fixture := newFileRouteFixture(t)
 	for _, route := range []struct{ method, path string }{
 		{http.MethodPost, "/api/files"},
+		{http.MethodGet, "/api/files"},
 		{http.MethodGet, "/api/files/1"},
 		{http.MethodPost, "/api/files/1/decrypt"},
 	} {
@@ -405,6 +422,69 @@ func TestFileRoutesMetadataDatabaseFailuresAreRedacted(t *testing.T) {
 	}
 }
 
+func TestFileRoutesListOwnedFiles(t *testing.T) {
+	fixture := newFileRouteFixture(t)
+	older := uploadFileRoute(t, fixture, "older.bin", []byte("older plaintext"))
+	fixture.repo.files[2] = models.File{ID: 2, UserID: 8, OriginalName: "private-other-user.bin", AESPath: "/private/other-user"}
+	newer := uploadFileRoute(t, fixture, "newer.bin", []byte("newer plaintext"))
+
+	// Listing is metadata-only; it must not require ciphertext to exist on disk.
+	for _, file := range fixture.repo.files {
+		if file.UserID == 7 {
+			if err := os.Remove(file.AESPath); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, path := range []string{"/api/files", "/api/files?user_id=8"} {
+		response := fileRouteRequest(fixture.router, http.MethodGet, path, fixture.token, "", nil)
+		files := decodeFileRouteList(t, response)
+		if len(files) != 2 || files[0] != newer || files[1] != older {
+			t.Fatalf("unexpected owner/order/metadata for %s: %+v", path, files)
+		}
+	}
+}
+
+func TestFileRoutesListEmptyAndDatabaseFailure(t *testing.T) {
+	fixture := newFileRouteFixture(t)
+	fixture.repo.files[1] = models.File{ID: 1, UserID: 8, OriginalName: "another-user.bin"}
+	response := fileRouteRequest(fixture.router, http.MethodGet, "/api/files", fixture.token, "", nil)
+	files := decodeFileRouteList(t, response)
+	if files == nil || len(files) != 0 || response.Body.String() != `{"files":[]}` {
+		t.Fatalf("expected a JSON empty array, got %s", response.Body.String())
+	}
+
+	fixture.repo.listErr = errors.New("postgres password=secret /private/storage")
+	response = fileRouteRequest(fixture.router, http.MethodGet, "/api/files", fixture.token, "", nil)
+	assertFileRouteError(t, response, http.StatusInternalServerError, "Failed to process file")
+}
+
+func decodeFileRouteList(t *testing.T, response *httptest.ResponseRecorder) []fileRouteMetadata {
+	t.Helper()
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status = %d; body: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("list must disable caching")
+	}
+	mediaType, _, err := mime.ParseMediaType(response.Header().Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		t.Fatalf("expected JSON list response: %v", err)
+	}
+	var result struct {
+		Files []fileRouteMetadata `json:"files"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(response.Body.Bytes()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		t.Fatalf("decode allowlisted list response: %v", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		t.Fatalf("unexpected trailing response data: %v", err)
+	}
+	return result.Files
+}
+
 func TestSetupRouterFileRoutesCORS(t *testing.T) {
 	fixture := newFileRouteFixture(t)
 	fixture.router = SetupRouter(Controller{
@@ -413,6 +493,17 @@ func TestSetupRouterFileRoutesCORS(t *testing.T) {
 	})
 	plaintext := []byte("CORS download through the actual application router")
 	metadata := uploadFileRoute(t, fixture, "cors.bin", plaintext)
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/files", nil)
+	listRequest.Header.Set("Origin", "http://localhost:5173")
+	listRequest.AddCookie(&http.Cookie{Name: "access_token", Value: fixture.token})
+	listResponse := httptest.NewRecorder()
+	fixture.router.ServeHTTP(listResponse, listRequest)
+	files := decodeFileRouteList(t, listResponse)
+	if len(files) != 1 || files[0] != metadata {
+		t.Fatalf("wired list returned unexpected files: %+v", files)
+	}
+	assertFileRouteCORS(t, listResponse.Header())
+
 	path := fmt.Sprintf("/api/files/%d/decrypt", metadata.ID)
 
 	preflight := httptest.NewRequest(http.MethodOptions, path, nil)

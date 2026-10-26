@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"project1/models"
@@ -18,6 +19,8 @@ import (
 type memoryFileRepository struct {
 	files     map[uint]models.File
 	createErr error
+	listErr   error
+	listCalls int
 	findErr   error
 	updateErr error
 	updates   int
@@ -30,6 +33,21 @@ func (r *memoryFileRepository) UploadFile(file *models.File) error {
 	file.ID = uint(len(r.files) + 1)
 	r.files[file.ID] = *file
 	return nil
+}
+
+func (r *memoryFileRepository) ListByUserID(userID uint) ([]models.File, error) {
+	r.listCalls++
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	files := make([]models.File, 0)
+	for _, file := range r.files {
+		if file.UserID == userID {
+			files = append(files, file)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].ID > files[j].ID })
+	return files, nil
 }
 
 func (r *memoryFileRepository) FindByIDAndUserID(fileID, userID uint) (*models.File, error) {
@@ -322,6 +340,43 @@ func TestFileServiceRejectsDamagedStoredFiles(t *testing.T) {
 				t.Fatal("failed decryption changed recorded timing")
 			}
 		})
+	}
+}
+
+func TestFileServiceListsOnlyOwnedFiles(t *testing.T) {
+	service, repo, _ := newTestFileService(t)
+	repo.files[1] = models.File{ID: 1, UserID: 7, OriginalName: "older.bin", AESEncryptTimeNS: 10, AESDecryptTimeNS: 20}
+	repo.files[2] = models.File{ID: 2, UserID: 8, OriginalName: "other-user.bin"}
+	repo.files[3] = models.File{ID: 3, UserID: 7, OriginalName: "newer.bin", AESEncryptTimeNS: 30, AESDecryptTimeNS: 40}
+
+	files, err := service.List(7)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("expected two owned files, got %v: %v", files, err)
+	}
+	for i, id := range []uint{3, 1} {
+		if files[i] != repo.files[id] {
+			t.Fatalf("file %d metadata/order mismatch: %+v", i, files[i])
+		}
+	}
+	files, err = service.List(9)
+	if err != nil || len(files) != 0 {
+		t.Fatalf("expected an empty list for another user: %v, %v", files, err)
+	}
+}
+
+func TestFileServiceListErrors(t *testing.T) {
+	service, repo, _ := newTestFileService(t)
+	if _, err := service.List(0); !errors.Is(err, ErrInvalidUser) {
+		t.Fatalf("expected invalid user, got %v", err)
+	}
+	if repo.listCalls != 0 {
+		t.Fatal("invalid user reached the repository")
+	}
+	databaseError := errors.New("database unavailable")
+	repo.listErr = databaseError
+	files, err := service.List(7)
+	if !errors.Is(err, databaseError) || files != nil {
+		t.Fatalf("expected wrapped database error without partial results: %v, %v", files, err)
 	}
 }
 

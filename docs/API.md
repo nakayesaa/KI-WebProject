@@ -1,6 +1,6 @@
 # Dokumentasi API Backend — Panduan FrontEnd
 
-Dokumen ini mengikuti implementasi backend saat ini, bukan rancangan fitur mendatang. Sumber utama: router, middleware, controller, service, dan utilitas di `backend/`. Kontrak upload, metadata, download hasil dekripsi, konfigurasi penyimpanan, dan pengukuran waktu AES dijelaskan di [Panduan API File](FILES.md).
+Dokumen ini mengikuti implementasi backend saat ini, bukan rancangan fitur mendatang. Sumber utama: router, middleware, controller, service, dan utilitas di `backend/`. Kontrak upload, daftar file, metadata, download hasil dekripsi, konfigurasi penyimpanan, dan pengukuran waktu AES dijelaskan di [Panduan API File](FILES.md).
 
 ## 1. Status implementasi
 
@@ -13,10 +13,11 @@ Dokumen ini mengikuti implementasi backend saat ini, bukan rancangan fitur menda
 | Profil pengguna / endpoint `/me` | Belum tersedia |
 | Refresh token dan logout server-side | Belum tersedia |
 | Upload, metadata per ID, dan download hasil dekripsi file AES | Tersedia; file terenkripsi di disk dan timing di database |
-| Daftar file, RC4, dan DES | Belum tersedia |
+| Daftar seluruh file milik pengguna login | Tersedia; `GET /api/files`, tanpa pagination atau filter |
+| RC4 dan DES | Belum tersedia |
 | CORS untuk akses lintas origin dari browser | Tersedia |
 
-**FrontEnd dapat mengintegrasikan register, login, upload file, metadata per ID, dan download hasil dekripsi AES.** Gunakan hanya endpoint yang tercantum; belum ada endpoint profil, daftar file, RC4, atau DES.
+**FrontEnd dapat mengintegrasikan register, login, upload file, daftar file milik pengguna login, metadata per ID, dan download hasil dekripsi AES.** Gunakan hanya endpoint yang tercantum; belum ada endpoint profil, RC4, atau DES.
 
 ## 2. Base URL dan konfigurasi
 
@@ -33,10 +34,13 @@ Semua endpoint yang tersedia:
 | `POST` | `/api/users/register` | Tidak diperlukan | Membuat pengguna |
 | `POST` | `/api/users/login` | Tidak diperlukan | Mengatur cookie JWT `access_token` |
 | `POST` | `/api/files` | Cookie `access_token` | Upload multipart, enkripsi, dan simpan file serta timing |
+| `GET` | `/api/files` | Cookie `access_token` | Seluruh metadata file milik pengguna login, urutan ID DESC, tanpa pagination/filter |
 | `GET` | `/api/files/:id` | Cookie `access_token` | Metadata file milik pengguna |
 | `POST` | `/api/files/:id/decrypt` | Cookie `access_token` | Dekripsi dan download byte asli; perbarui timing dekripsi |
 
 Tidak ada prefix versi seperti `/v1`.
+
+`GET /api/files` mengembalikan `200 OK` dengan `{"files":[...]}` (kosong: `{"files":[]}`) dan `Cache-Control: no-store`. Setiap item memakai DTO metadata yang sama dengan `GET /api/files/:id`: `id`, `original_name`, `original_size`, `original_type`, `algorithm`, `aes_encrypt_time_ns`, dan `aes_decrypt_time_ns`. Urutan **ID DESC** berarti record terbaru diinsert terlebih dahulu. Owner berasal dari `AuthMiddleware` yang sudah ada melalui cookie login; query `user_id` dari klien diabaikan dan tidak memberi akses ke file pengguna lain. Endpoint tidak menerima pagination/filter, tidak membaca disk atau mengukur ulang timing, dan tetap menyertakan record historis metadata-only. Response tidak berisi path disk atau key. Error autentikasi `401` mengikuti middleware yang sama (lihat bagian 5); kegagalan pemrosesan menghasilkan `500` dengan `{"message":"Failed to process file"}`. Contoh fetch dan curl cookie jar ada di [Panduan API File](FILES.md).
 
 ### Header request
 
@@ -235,7 +239,7 @@ Alur yang dapat diterapkan sekarang:
 2. Setelah `201`, tampilkan informasi sukses dan arahkan ke halaman login.
 3. Login melalui `/api/users/login` dengan `credentials: "include"` jika lintas origin.
 4. Setelah `200`, browser menyimpan cookie `HttpOnly`; update state UI dan pindah ke tampilan setelah login. Jangan membaca `result.token` atau menyimpan JWT di `localStorage`/`sessionStorage`.
-5. Kirim cookie pada request file dengan `credentials: "include"`; `AuthMiddleware` memvalidasi JWT dan meneruskan ID pengguna. Metadata dan dekripsi hanya mengakses file milik pengguna tersebut.
+5. Kirim cookie pada request file dengan `credentials: "include"`; `AuthMiddleware` memvalidasi JWT dan meneruskan ID pengguna. Daftar file, metadata, dan dekripsi hanya mengakses file milik pengguna tersebut.
 6. Jika request terproteksi menghasilkan `401`, minta pengguna login lagi; belum ada endpoint refresh.
 
 Middleware membaca **cookie `access_token`**, bukan header `Authorization: Bearer ...`. Cookie hilang menghasilkan `401` dengan `message: "Missing authentication cookie"`; JWT invalid/kedaluwarsa menghasilkan `"Invalid or expired token"`. Claim ID tidak valid dapat menghasilkan `"Unauthorized: user_id missing"`; controller file juga dapat mengembalikan `"Unauthorized"`.
@@ -366,7 +370,8 @@ Checklist FrontEnd:
 - [ ] Token/key tidak dicetak ke log atau dibagikan; komunikasi produksi menggunakan HTTPS (cookie saat ini belum `Secure`).
 - [ ] Download dekripsi sukses dibaca dengan `response.blob()`; error JSON ditangani berdasarkan status.
 - [ ] Timing nanodetik dibagi `1e6` untuk milidetik; pahami cakupan pengukuran di [Panduan API File](FILES.md#4-arti-dan-batasan-timing).
-- [ ] UI profil/daftar file/RC4/DES tidak memanggil endpoint yang belum tersedia.
+- [ ] Daftar file memakai `GET /api/files` tanpa pagination/filter; owner ditentukan cookie, bukan query `user_id`.
+- [ ] UI profil/RC4/DES tidak memanggil endpoint yang belum tersedia.
 
 ## 8. Referensi implementasi
 

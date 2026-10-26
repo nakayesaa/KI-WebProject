@@ -1,6 +1,6 @@
 # API File — Persistensi dan Timing AES
 
-Panduan ini melengkapi [Dokumentasi API Backend](API.md). Implementasi saat ini hanya mendukung **AES-128-CBC-HMAC-SHA256**; belum ada endpoint daftar file, RC4, atau DES, meskipun model database memiliki field path RC4/DES.
+Panduan ini melengkapi [Dokumentasi API Backend](API.md). Implementasi saat ini hanya mendukung **AES-128-CBC-HMAC-SHA256**; daftar file milik pengguna login tersedia, tetapi belum ada RC4 atau DES, meskipun model database memiliki field path RC4/DES.
 
 ## 1. Konfigurasi dan persistensi
 
@@ -33,9 +33,9 @@ Record lama yang hanya berisi metadata tanpa file envelope AES1 yang valid **tid
 
 ## 2. Autentikasi dan kepemilikan
 
-Ketiga endpoint di bawah berada di group `/api/files` yang dilindungi `AuthMiddleware` yang sudah ada. Login melalui `POST /api/users/login` mengembalikan hanya `{"message":"Login successful"}` dan mengatur cookie JWT **`access_token` (`HttpOnly`)**. Claim ID internal bernama `userId`. Middleware membaca cookie, bukan header Bearer; lihat [alur autentikasi](API.md#5-jwt-dan-alur-autentikasi-frontend).
+Keempat endpoint di bawah berada di group `/api/files` yang dilindungi `AuthMiddleware` yang sudah ada. Login melalui `POST /api/users/login` mengembalikan hanya `{"message":"Login successful"}` dan mengatur cookie JWT **`access_token` (`HttpOnly`)**. Claim ID internal bernama `userId`. Middleware membaca cookie, bukan header Bearer; lihat [alur autentikasi](API.md#5-jwt-dan-alur-autentikasi-frontend).
 
-Query metadata, dekripsi, dan update timing dibatasi oleh ID file **dan** ID pengguna login. ID yang tidak ada maupun milik pengguna lain menghasilkan `404`, bukan membocorkan keberadaan file tersebut. Tidak ada parameter owner yang perlu dikirim frontend.
+Query metadata, dekripsi, dan update timing dibatasi oleh ID file **dan** ID pengguna login. ID yang tidak ada maupun milik pengguna lain menghasilkan `404`, bukan membocorkan keberadaan file tersebut. Daftar file hanya memuat seluruh record milik pengguna login. Owner diambil dari `AuthMiddleware` yang sudah ada melalui cookie `access_token`, bukan input klien; query `user_id` diabaikan dan tidak dapat dipakai untuk mengakses file pengguna lain. Tidak ada parameter owner yang perlu dikirim frontend.
 
 ## 3. Endpoint
 
@@ -68,6 +68,32 @@ Response sukses — `201 Created`, JSON:
 
 Angka ID/ukuran/timing di atas hanya ilustrasi, bukan hasil benchmark.
 
+### Daftar file — `GET /api/files`
+
+Tanpa body, pagination, atau filter. Mengembalikan **seluruh record milik pengguna login**, diurutkan **ID DESC** (record terbaru diinsert terlebih dahulu), bukan berdasarkan nama atau timing.
+
+Response sukses — `200 OK`, header `Cache-Control: no-store`, JSON:
+
+```json
+{
+  "files": [
+    {
+      "id": 1,
+      "original_name": "laporan.pdf",
+      "original_size": 4096,
+      "original_type": "application/pdf",
+      "algorithm": "AES-128-CBC-HMAC-SHA256",
+      "aes_encrypt_time_ns": 2500000,
+      "aes_decrypt_time_ns": 2700000
+    }
+  ]
+}
+```
+
+Jika tidak ada record milik pengguna, response tetap `200 OK` dengan `{"files":[]}`, bukan `null` atau `404`. Setiap item memakai **DTO metadata yang sama** dengan endpoint metadata per ID: hanya tujuh field di atas, tanpa path disk atau key. Endpoint hanya membaca metadata database, tidak membaca/memeriksa file disk dan tidak mengukur ulang timing. Record historis metadata-only tetap disertakan, meskipun tidak dapat didekripsi; timing tersimpan (termasuk default historis `0`) dikembalikan apa adanya.
+
+Error `401` memakai pesan `AuthMiddleware` yang sudah ada seperti pada tabel error di bawah. Kegagalan pemrosesan/database menghasilkan `500 Internal Server Error` dengan `{"message":"Failed to process file"}`.
+
 ### Metadata — `GET /api/files/:id`
 
 Tanpa body. `:id` harus berupa bilangan bulat positif. Response sukses — `200 OK`, JSON dengan satu properti `file` yang memiliki field sama seperti upload, tanpa properti `message`:
@@ -88,7 +114,7 @@ Tanpa body. `:id` harus berupa bilangan bulat positif. Response sukses — `200 
 
 | Field | Makna |
 | --- | --- |
-| `id` | ID record; simpan dari response upload karena belum ada endpoint daftar file. |
+| `id` | ID record; diperoleh dari response upload atau daftar file milik pengguna login. |
 | `original_name` | Nama asli yang diambil basename-nya, bukan path upload pengguna. |
 | `original_size` | Ukuran plaintext dalam byte, bukan ukuran ciphertext. |
 | `original_type` | `Content-Type` dari bagian multipart upload; metadata klien, bukan hasil verifikasi tipe isi. |
@@ -114,7 +140,7 @@ Cache-Control: no-store
 
 `Content-Disposition` diformat oleh backend menggunakan nama asli tersanitasi; quoting/encoding dapat berbeda untuk nama yang mengandung spasi atau karakter non-ASCII. `X-Decryption-Time-Ns` adalah integer desimal dalam nanodetik untuk dekripsi pada request ini, sama dengan nilai yang dipersistenkan oleh request tersebut. Request dekripsi berikutnya **menimpa** nilai lama; tidak ada riwayat/akumulasi/rata-rata, dan request bersamaan dapat menimpa nilai satu sama lain. `aes_encrypt_time_ns` tidak berubah. Ambil metadata lagi untuk membaca nilai dekripsi terakhir yang tersimpan.
 
-Upload dan metadata juga mengatur `Cache-Control: no-store`. Jangan mengandalkan seluruh response error middleware memiliki header tersebut.
+Upload, daftar file, dan metadata juga mengatur `Cache-Control: no-store`. Jangan mengandalkan seluruh response error middleware memiliki header tersebut.
 
 ### Error
 
@@ -173,6 +199,9 @@ curl -i -c cookies.txt -X POST http://localhost:8080/api/users/login \
 curl -i -b cookies.txt http://localhost:8080/api/files \
   -F 'file=@./laporan.pdf'
 
+# Daftar seluruh file milik pengguna cookie ini, urutan ID DESC, tanpa pagination/filter.
+curl -i -b cookies.txt http://localhost:8080/api/files
+
 # Baca metadata dan timing yang dipersistenkan.
 curl -i -b cookies.txt http://localhost:8080/api/files/1
 
@@ -215,6 +244,15 @@ async function uploadFile(file) {
   });
   if (!response.ok) await throwFileError(response);
   return (await response.json()).file;
+}
+
+async function listFiles() {
+  const response = await fetch(`${API_BASE_URL}/files`, {
+    method: "GET",
+    credentials: "include",
+  });
+  if (!response.ok) await throwFileError(response);
+  return (await response.json()).files; // Array metadata ID DESC; [] jika kosong.
 }
 
 async function getFileMetadata(id) {

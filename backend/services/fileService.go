@@ -34,6 +34,7 @@ var (
 
 type fileRepository interface {
 	UploadFile(*models.File) error
+	ListByUserID(userID uint) ([]models.File, error)
 	FindByIDAndUserID(fileID, userID uint) (*models.File, error)
 	UpdateAESDecryptTime(fileID, userID uint, durationNS int64) error
 }
@@ -132,6 +133,17 @@ func (s *FileService) Upload(userID uint, file *multipart.FileHeader) (*models.F
 	}
 	persisted = true
 	return newFile, nil
+}
+
+func (s *FileService) List(userID uint) ([]models.File, error) {
+	if userID == 0 {
+		return nil, ErrInvalidUser
+	}
+	files, err := s.fileRepo.ListByUserID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("list files: %w", err)
+	}
+	return files, nil
 }
 
 func (s *FileService) FindByID(userID, fileID uint) (*models.File, error) {

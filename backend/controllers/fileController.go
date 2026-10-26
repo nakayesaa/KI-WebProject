@@ -57,6 +57,25 @@ func (c *FileController) Upload(ctx *gin.Context) {
 	})
 }
 
+func (c *FileController) List(ctx *gin.Context) {
+	userID, ok := fileUserID(ctx)
+	if !ok {
+		return
+	}
+	ctx.Header("Cache-Control", "no-store")
+	files, err := c.FileService.List(userID)
+	if err != nil {
+		fileError(ctx, err)
+		return
+	}
+
+	response := make([]gin.H, 0, len(files))
+	for i := range files {
+		response = append(response, fileResponse(&files[i]))
+	}
+	ctx.JSON(http.StatusOK, gin.H{"files": response})
+}
+
 func (c *FileController) Get(ctx *gin.Context) {
 	userID, ok := fileUserID(ctx)
 	if !ok {
