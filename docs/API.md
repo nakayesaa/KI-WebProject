@@ -1,6 +1,6 @@
 # Dokumentasi API Backend — Panduan FrontEnd
 
-Dokumen ini mengikuti implementasi backend saat ini, bukan rancangan fitur mendatang. Sumber utama: router, controller autentikasi, service autentikasi, dan generator JWT di `backend/`.
+Dokumen ini mengikuti implementasi backend saat ini, bukan rancangan fitur mendatang. Sumber utama: router, middleware, controller, service, dan utilitas di `backend/`. Kontrak upload, metadata, download hasil dekripsi, konfigurasi penyimpanan, dan pengukuran waktu AES dijelaskan di [Panduan API File](FILES.md).
 
 ## 1. Status implementasi
 
@@ -9,13 +9,14 @@ Dokumen ini mengikuti implementasi backend saat ini, bukan rancangan fitur menda
 | Register pengguna | Tersedia |
 | Login dengan username dan password | Tersedia |
 | Penerbitan JWT saat login | Tersedia |
-| Middleware untuk verifikasi JWT / endpoint terproteksi | Belum tersedia |
+| Middleware untuk verifikasi JWT / endpoint terproteksi | Tersedia; `AuthMiddleware` membaca cookie `access_token` |
 | Profil pengguna / endpoint `/me` | Belum tersedia |
 | Refresh token dan logout server-side | Belum tersedia |
-| Upload, daftar, download, dan enkripsi/dekripsi file | Belum tersedia; baru ada model database `File` |
+| Upload, metadata per ID, dan download hasil dekripsi file AES | Tersedia; file terenkripsi di disk dan timing di database |
+| Daftar file, RC4, dan DES | Belum tersedia |
 | CORS untuk akses lintas origin dari browser | Tersedia |
 
-**FrontEnd saat ini bisa mengintegrasikan form register dan login.** Jangan menganggap model database sebagai endpoint API yang sudah dapat dipanggil.
+**FrontEnd dapat mengintegrasikan register, login, upload file, metadata per ID, dan download hasil dekripsi AES.** Gunakan hanya endpoint yang tercantum; belum ada endpoint profil, daftar file, RC4, atau DES.
 
 ## 2. Base URL dan konfigurasi
 
@@ -30,7 +31,10 @@ Semua endpoint yang tersedia:
 | Method | Path lengkap | Autentikasi | Fungsi |
 | --- | --- | --- | --- |
 | `POST` | `/api/users/register` | Tidak diperlukan | Membuat pengguna |
-| `POST` | `/api/users/login` | Tidak diperlukan | Mendapatkan JWT |
+| `POST` | `/api/users/login` | Tidak diperlukan | Mengatur cookie JWT `access_token` |
+| `POST` | `/api/files` | Cookie `access_token` | Upload multipart, enkripsi, dan simpan file serta timing |
+| `GET` | `/api/files/:id` | Cookie `access_token` | Metadata file milik pengguna |
+| `POST` | `/api/files/:id/decrypt` | Cookie `access_token` | Dekripsi dan download byte asli; perbarui timing dekripsi |
 
 Tidak ada prefix versi seperti `/v1`.
 
@@ -41,7 +45,7 @@ Content-Type: application/json
 Accept: application/json
 ```
 
-Kirim body JSON, bukan `FormData` atau form URL-encoded. Kedua endpoint tidak memerlukan header `Authorization`.
+Untuk **register dan login**, kirim body JSON, bukan `FormData` atau form URL-encoded. Kedua endpoint tidak memerlukan header `Authorization`. Endpoint file menggunakan cookie, bukan Bearer token. Upload memakai `FormData` dengan field `file`; **jangan mengatur `Content-Type` secara manual** karena browser harus menambahkan boundary multipart. Dekripsi sukses mengembalikan binary, bukan JSON; lihat [Panduan API File](FILES.md).
 
 ### Menjalankan backend untuk integrasi lokal
 
@@ -55,15 +59,17 @@ JWT_SECRET=ganti-dengan-secret-acak-yang-kuat
 
 Nilai di atas hanya contoh; sesuaikan kredensial database. `sslmode=disable` hanya untuk contoh lingkungan lokal. Jangan commit kredensial atau secret ke repository.
 
+Tambahkan juga **`FILE_ENCRYPTION_KEY` yang wajib**: jalankan `openssl rand -hex 32` sekali, lalu simpan output 64 karakter hex (32 byte acak) sebagai nilai `FILE_ENCRYPTION_KEY` di `backend/.env`. Jangan membuat ulang key pada setiap startup; file lama membutuhkan key yang sama untuk didekripsi. Backup key secara terpisah dan aman. `FILE_STORAGE_DIR` opsional, default `storage/uploads` relatif terhadap working directory backend. Gunakan storage/volume persisten, jangan public static hosting. Detail konfigurasi dan pemulihan ada di [Panduan API File](FILES.md#1-konfigurasi-dan-persistensi).
+
 Jalankan dari direktori `backend/`:
 
 ```sh
 go run .
 ```
 
-Backend memanggil `godotenv.Load()` dan akan berhenti jika file `.env` gagal dimuat. Saat startup, backend juga menghubungkan database dan menjalankan migrasi model `User` serta `File`.
+Backend memanggil `godotenv.Load()` dan akan berhenti jika file `.env` gagal dimuat. Saat startup, backend juga menghubungkan database dan menjalankan `AutoMigrate` model `User` serta `File`, termasuk kolom timing AES dengan default `0` untuk record historis. Startup gagal jika `FILE_ENCRYPTION_KEY` tidak valid atau direktori penyimpanan gagal disiapkan.
 
-`DATABASE_URL` dan `JWT_SECRET` hanya untuk backend. **Jangan memasukkan `JWT_SECRET` atau kredensial database ke environment FrontEnd yang dibundel ke browser.**
+`DATABASE_URL`, `JWT_SECRET`, dan `FILE_ENCRYPTION_KEY` hanya untuk backend. **Jangan memasukkan secret, key enkripsi file, atau kredensial database ke environment FrontEnd yang dibundel ke browser.** Key enkripsi tidak disimpan dalam database atau dikirim ke browser.
 
 ## 3. Register
 
@@ -168,12 +174,13 @@ Login menggunakan **username**, bukan nama atau email.
 
 ```json
 {
-  "message": "Login successful",
-  "token": "<JWT-yang-dihasilkan-backend>"
+  "message": "Login successful"
 }
 ```
 
-Nilai `token` di atas adalah ilustrasi, bukan token untuk dipakai mengakses server. Response tidak menyertakan objek pengguna, `refresh_token`, `token_type`, atau `expires_in`.
+JWT **tidak dikembalikan dalam JSON**. Response mengatur cookie `access_token` dengan `HttpOnly`, `SameSite=Lax`, `Path=/`, dan `Max-Age=86400` (24 jam), tanpa atribut Domain eksplisit. Implementasi saat ini memakai `Secure=false`; jangan menganggap konfigurasi lokal ini sudah siap produksi. Response tidak menyertakan objek pengguna, `token`, `refresh_token`, `token_type`, atau `expires_in`.
+
+Browser menyimpan/mengirim cookie; JavaScript tidak dapat membacanya melalui `document.cookie`. Untuk login dan request file lintas origin, gunakan `credentials: "include"`.
 
 ### Response error
 
@@ -200,7 +207,7 @@ Controller login saat ini memetakan seluruh error service ke `401`. Karena itu, 
 ### Contoh curl
 
 ```sh
-curl -i -X POST http://localhost:8080/api/users/login \
+curl -i -c cookies.txt -X POST http://localhost:8080/api/users/login \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json' \
   --data '{"username":"nopal","password":"contoh-password-kuat"}'
@@ -214,32 +221,30 @@ Payload yang dibuat backend:
 
 ```json
 {
-  "user_id": 1,
+  "userId": 1,
   "username": "nopal",
   "exp": 1791158400
 }
 ```
 
-Angka di atas hanya contoh. `user_id` adalah ID database, sedangkan `exp` adalah Unix timestamp dalam **detik**, bukan milidetik.
+Angka di atas hanya contoh struktur internal JWT, bukan response login. `userId` (camelCase) adalah ID database, sedangkan `exp` adalah Unix timestamp dalam **detik**, bukan milidetik. FrontEnd tidak perlu membaca JWT untuk memanggil endpoint file.
 
 Alur yang dapat diterapkan sekarang:
 
 1. Register melalui `/api/users/register`.
 2. Setelah `201`, tampilkan informasi sukses dan arahkan ke halaman login.
-3. Login melalui `/api/users/login`.
-4. Setelah `200`, simpan token dalam state autentikasi FrontEnd dan pindah ke tampilan setelah login.
-5. Untuk logout lokal, hapus token dari state/penyimpanan FrontEnd.
-6. Jika token sudah kedaluwarsa, minta pengguna login lagi; belum ada endpoint refresh.
+3. Login melalui `/api/users/login` dengan `credentials: "include"` jika lintas origin.
+4. Setelah `200`, browser menyimpan cookie `HttpOnly`; update state UI dan pindah ke tampilan setelah login. Jangan membaca `result.token` atau menyimpan JWT di `localStorage`/`sessionStorage`.
+5. Kirim cookie pada request file dengan `credentials: "include"`; `AuthMiddleware` memvalidasi JWT dan meneruskan ID pengguna. Metadata dan dekripsi hanya mengakses file milik pengguna tersebut.
+6. Jika request terproteksi menghasilkan `401`, minta pengguna login lagi; belum ada endpoint refresh.
 
-**Batasan penting:** backend baru menerbitkan JWT, belum memverifikasi JWT pada request berikutnya. Belum ada endpoint terproteksi maupun kontrak header Bearer yang sudah digunakan oleh middleware. Menampilkan halaman setelah login di FrontEnd tidak berarti API lain sudah terlindungi.
+Middleware membaca **cookie `access_token`**, bukan header `Authorization: Bearer ...`. Cookie hilang menghasilkan `401` dengan `message: "Missing authentication cookie"`; JWT invalid/kedaluwarsa menghasilkan `"Invalid or expired token"`. Claim ID tidak valid dapat menghasilkan `"Unauthorized: user_id missing"`; controller file juga dapat mengembalikan `"Unauthorized"`.
 
-Logout lokal tidak membatalkan token yang sudah diterbitkan. Tidak ada mekanisme revokasi server-side saat ini. Decode payload di browser boleh digunakan untuk tampilan atau pemeriksaan waktu kedaluwarsa, tetapi bukan bukti bahwa token sah.
-
-Untuk contoh integrasi, gunakan penyimpanan token di memory/state. Jika ingin persistensi melalui `localStorage` atau `sessionStorage`, pertimbangkan risiko pencurian token melalui XSS. Backend saat ini tidak mengirim cookie autentikasi `HttpOnly`.
+Belum ada endpoint logout, penghapusan cookie, atau revokasi token server-side. Menghapus state UI **tidak** menghapus cookie `HttpOnly` dan **tidak** mengakhiri autentikasi backend; JavaScript tidak dapat menghapus cookie tersebut. Jangan menyebut reset UI sebagai logout yang aman.
 
 ## 6. Contoh integrasi JavaScript dengan fetch
 
-Contoh ini menggunakan path relatif `/api`. Artinya FrontEnd harus berada pada origin yang sama dengan backend atau menggunakan proxy development yang meneruskan `/api` ke backend.
+Contoh ini menggunakan path relatif `/api`. Artinya FrontEnd harus berada pada origin yang sama dengan backend atau menggunakan proxy development yang meneruskan `/api` ke backend. Untuk akses langsung dari `http://localhost:5173`, ubah base URL menjadi `http://localhost:8080/api` (sesuaikan port); `credentials: "include"` diperlukan agar cookie login disimpan dan dikirim lintas origin.
 
 ```js
 const API_BASE_URL = "/api";
@@ -255,6 +260,7 @@ class ApiError extends Error {
 async function postJson(path, body) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
@@ -287,13 +293,11 @@ function login({ username, password }) {
   return postJson("/users/login", { username, password });
 }
 
-// Contoh state sederhana; sesuaikan dengan state management aplikasi.
-let authToken = null;
+// State UI saja; autentikasi backend tetap ditentukan oleh cookie.
 
 async function submitLogin(username, password) {
   try {
-    const result = await login({ username, password });
-    authToken = result.token;
+    await login({ username, password });
     // Update state UI dan arahkan ke halaman setelah login di sini.
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
@@ -305,9 +309,6 @@ async function submitLogin(username, password) {
   }
 }
 
-function logoutLocal() {
-  authToken = null;
-}
 ```
 
 `fetch` tidak otomatis melempar error untuk HTTP `400`, `401`, `409`, atau `500`; karena itu helper memeriksa `response.ok`. Error jaringan/CORS biasanya tidak menyediakan status HTTP yang dapat dibaca, sehingga jangan menyamakannya dengan `401`.
@@ -332,7 +333,6 @@ type RegisterResponse = {
 
 type LoginResponse = {
   message: string;
-  token: string;
 };
 
 type ErrorResponse = {
@@ -344,26 +344,29 @@ Tipe error tersebut berlaku untuk response JSON dari controller autentikasi, buk
 
 ## 7. CORS dan checklist integrasi
 
-Router saat ini menggunakan `gin.Default()` tanpa middleware CORS. Jika FrontEnd dan backend berbeda origin, misalnya `http://localhost:5173` dan `http://localhost:8080`, request JSON dari browser memerlukan penanganan CORS/preflight yang belum tersedia.
+Router memakai `gin.Default()` dengan middleware CORS. Origin yang diizinkan saat ini hanya **`http://localhost:5173`**, dengan `AllowCredentials: true`. Method yang diizinkan: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`; ini bukan berarti semuanya memiliki endpoint. Header request yang diizinkan: `Origin`, `Content-Type`, `Authorization`. Header response yang diekspos ke JavaScript: `Content-Length`, `Content-Disposition`, `X-Decryption-Time-Ns`.
 
 Untuk development, gunakan salah satu pendekatan:
 
 - Konfigurasikan proxy dev server FrontEnd agar request relatif `/api/...` diteruskan ke `http://localhost:<SERVER_PORT>/api/...`, **tanpa menghapus prefix `/api`**.
-- Tambahkan konfigurasi CORS di backend sebagai pekerjaan terpisah jika ingin akses langsung lintas origin.
+- Akses backend langsung dari `http://localhost:5173` menggunakan base URL backend dan `credentials: "include"` pada login maupun seluruh request file. Origin lain (termasuk `http://127.0.0.1:5173`) belum diizinkan oleh konfigurasi saat ini.
 
-Jangan gunakan `mode: "no-cors"` sebagai solusi; response menjadi opaque dan JSON/token tidak dapat dibaca. Request `curl` yang berhasil belum membuktikan bahwa akses lintas origin dari browser sudah bekerja.
+Jangan gunakan `mode: "no-cors"` sebagai solusi; response menjadi opaque dan isinya tidak dapat dibaca. Request `curl` yang berhasil belum membuktikan bahwa akses lintas origin dari browser sudah bekerja. `SameSite=Lax` juga membatasi cookie pada skenario cross-site; `credentials: "include"` tidak melewati aturan cookie browser. CORS lokal ini bukan jaminan kesiapan produksi atau perlindungan CSRF.
 
 Checklist FrontEnd:
 
 - [ ] Base URL atau target proxy sesuai `SERVER_PORT` backend.
-- [ ] Body dikirim sebagai JSON menggunakan nama field yang benar.
+- [ ] Register/login dikirim sebagai JSON; upload sebagai `FormData` field `file` tanpa `Content-Type` manual.
 - [ ] Form login memakai `username`, bukan `email`.
 - [ ] Register sukses ditangani sebagai `201`, bukan hanya `200`.
 - [ ] Register tidak dianggap otomatis login.
 - [ ] Error ditangani berdasarkan status HTTP; pesan internal `500` sebaiknya tidak ditampilkan mentah ke pengguna.
 - [ ] Error jaringan/CORS ditangani terpisah dari kegagalan kredensial.
-- [ ] Token tidak dicetak ke log atau dibagikan; komunikasi produksi menggunakan HTTPS.
-- [ ] UI fitur profil/file tidak memanggil endpoint yang belum tersedia.
+- [ ] Login dan request file memakai `credentials: "include"` untuk akses lintas origin; tidak mengharapkan `result.token`.
+- [ ] Token/key tidak dicetak ke log atau dibagikan; komunikasi produksi menggunakan HTTPS (cookie saat ini belum `Secure`).
+- [ ] Download dekripsi sukses dibaca dengan `response.blob()`; error JSON ditangani berdasarkan status.
+- [ ] Timing nanodetik dibagi `1e6` untuk milidetik; pahami cakupan pengukuran di [Panduan API File](FILES.md#4-arti-dan-batasan-timing).
+- [ ] UI profil/daftar file/RC4/DES tidak memanggil endpoint yang belum tersedia.
 
 ## 8. Referensi implementasi
 
@@ -375,6 +378,10 @@ Path relatif terhadap root project:
 - `backend/services/authService.go` — pengecekan username, bcrypt, dan alur login.
 - `backend/repositories/userRepository.go` — pencarian username dan penyimpanan pengguna.
 - `backend/utils/jwt.go` — algoritma, claims, dan masa berlaku JWT.
+- `backend/middlewares/authMiddleware.go` — validasi cookie JWT pada route terproteksi.
+- `backend/routers/fileRouter.go` dan `backend/controllers/fileController.go` — endpoint file, DTO metadata, header download, dan status error.
+- `backend/services/fileService.go` dan `backend/repositories/fileRepository.go` — persistensi disk/database, kepemilikan, dan timing.
+- `backend/utils/aes_file.go` — envelope AES1 dan derivasi key; AES buatan tangan untuk pembelajaran, bukan keamanan produksi.
 - `backend/main.go` dan `backend/config/database.go` — environment, startup, dan database.
 - `backend/models/user.go` dan `backend/models/file.go` — model database, bukan kontrak response API.
 
