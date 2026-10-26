@@ -11,4 +11,7 @@ type File struct {
 	AESPath string
 	RC4Path string
 	DESPath string
+
+	AESEncryptTimeNS int64 `gorm:"column:aes_encrypt_time_ns;not null;default:0"`
+	AESDecryptTimeNS int64 `gorm:"column:aes_decrypt_time_ns;not null;default:0"`
 }
