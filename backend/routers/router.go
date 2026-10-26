@@ -11,6 +11,7 @@ import (
 
 type Controller struct {
 	AuthController *controllers.AuthController
+	FileController *controllers.FileController
 }
 
 func SetupRouter(c Controller) *gin.Engine {
@@ -35,6 +36,8 @@ func SetupRouter(c Controller) *gin.Engine {
 		},
 		ExposeHeaders: []string{
 			"Content-Length",
+			"Content-Disposition",
+			"X-Decryption-Time-Ns",
 		},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
@@ -43,6 +46,7 @@ func SetupRouter(c Controller) *gin.Engine {
 	api := r.Group("/api")
 
 	RegisterUserRouter(api, c.AuthController)
+	RegisterFileRouter(api, c.FileController)
 
 	return r
 }
