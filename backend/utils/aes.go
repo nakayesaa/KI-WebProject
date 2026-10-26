@@ -208,3 +208,68 @@ func AesEncrypt128(plainText [16]byte, key [16]byte) [16]byte {
 
 	return StateToBytes(state)
 }
+
+func GenerateInverseSBox(sbox [256]byte) [256]byte {
+	var inverseSBox [256]byte
+
+	for i, value := range sbox {
+		inverseSBox[value] = byte(i)
+	}
+
+	return inverseSBox
+}
+
+func InvSubBytes(state *State, inverseSBox *[256]byte) {
+	for row := range 4 {
+		for col := range 4 {
+			state[row][col] = inverseSBox[state[row][col]]
+		}
+	}
+}
+
+func InvShiftRow(state *State) {
+	for row := 1; row < 4; row++ {
+		var temp [4]byte
+
+		for col := range 4 {
+			temp[col] = state[row][(col-row+4)%4]
+		}
+		state[row] = temp
+	}
+}
+
+func InvMixColumns(state *State) {
+	for col := range 4 {
+		a0 := state[0][col]
+		a1 := state[1][col]
+		a2 := state[2][col]
+		a3 := state[3][col]
+
+		state[0][col] = GFMul(0x0e, a0) ^ GFMul(0x0b, a1) ^ GFMul(0x0d, a2) ^ GFMul(0x09, a3)
+		state[1][col] = GFMul(0x09, a0) ^ GFMul(0x0e, a1) ^ GFMul(0x0b, a2) ^ GFMul(0x0d, a3)
+		state[2][col] = GFMul(0x0d, a0) ^ GFMul(0x09, a1) ^ GFMul(0x0e, a2) ^ GFMul(0x0b, a3)
+		state[3][col] = GFMul(0x0b, a0) ^ GFMul(0x0d, a1) ^ GFMul(0x09, a2) ^ GFMul(0x0e, a3)
+	}
+}
+
+func AesDecrypt128(cipherText [16]byte, key [16]byte) [16]byte {
+	state := BytesToState(cipherText)
+
+	roundKeys, sbox := KeyExpansion(key)
+	inverseSBox := GenerateInverseSBox(sbox)
+
+	AddRoundKey(&state, &roundKeys[10])
+
+	for round := 9; round > 0; round-- {
+		InvShiftRow(&state)
+		InvSubBytes(&state, &inverseSBox)
+		AddRoundKey(&state, &roundKeys[round])
+		InvMixColumns(&state)
+	}
+
+	InvShiftRow(&state)
+	InvSubBytes(&state, &inverseSBox)
+	AddRoundKey(&state, &roundKeys[0])
+
+	return StateToBytes(state)
+}
