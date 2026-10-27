@@ -185,24 +185,44 @@ func StateToBytes(state State) [16]byte {
 	return result
 }
 
-func AesEncrypt128(plainText [16]byte, key [16]byte) [16]byte {
-	state := BytesToState(plainText)
+// preparedAES128 is educational, non-constant-time AES. Reuse it across blocks
+// so key expansion and S-box generation happen only once per file operation.
+type preparedAES128 struct {
+	roundKeys   [11]State
+	sbox        [256]byte
+	inverseSBox [256]byte
+}
 
+func prepareAES128(key [16]byte) *preparedAES128 {
 	roundKeys, sbox := KeyExpansion(key)
+	return &preparedAES128{
+		roundKeys:   roundKeys,
+		sbox:        sbox,
+		inverseSBox: GenerateInverseSBox(sbox),
+	}
+}
+
+func AesEncrypt128(plainText [16]byte, key [16]byte) [16]byte {
+	return prepareAES128(key).encrypt(plainText)
+}
+
+func (prepared *preparedAES128) encrypt(plainText [16]byte) [16]byte {
+	state := BytesToState(plainText)
+	roundKeys, sbox := &prepared.roundKeys, &prepared.sbox
 
 	// Initial Round
 	AddRoundKey(&state, &roundKeys[0])
 
 	// Round 1–9
 	for round := 1; round < 10; round++ {
-		SubBytes(&state, &sbox)
+		SubBytes(&state, sbox)
 		ShiftRow(&state)
 		MixColumns(&state)
 		AddRoundKey(&state, &roundKeys[round])
 	}
 
 	// Final Round (10)
-	SubBytes(&state, &sbox)
+	SubBytes(&state, sbox)
 	ShiftRow(&state)
 	AddRoundKey(&state, &roundKeys[10])
 
@@ -253,22 +273,24 @@ func InvMixColumns(state *State) {
 }
 
 func AesDecrypt128(cipherText [16]byte, key [16]byte) [16]byte {
-	state := BytesToState(cipherText)
+	return prepareAES128(key).decrypt(cipherText)
+}
 
-	roundKeys, sbox := KeyExpansion(key)
-	inverseSBox := GenerateInverseSBox(sbox)
+func (prepared *preparedAES128) decrypt(cipherText [16]byte) [16]byte {
+	state := BytesToState(cipherText)
+	roundKeys, inverseSBox := &prepared.roundKeys, &prepared.inverseSBox
 
 	AddRoundKey(&state, &roundKeys[10])
 
 	for round := 9; round > 0; round-- {
 		InvShiftRow(&state)
-		InvSubBytes(&state, &inverseSBox)
+		InvSubBytes(&state, inverseSBox)
 		AddRoundKey(&state, &roundKeys[round])
 		InvMixColumns(&state)
 	}
 
 	InvShiftRow(&state)
-	InvSubBytes(&state, &inverseSBox)
+	InvSubBytes(&state, inverseSBox)
 	AddRoundKey(&state, &roundKeys[0])
 
 	return StateToBytes(state)
